@@ -1,0 +1,11 @@
+{
+  "_note": "로컬 시험용(Notion 없이 engine.run 사용). 실제 값은 Notion 엔진 파라미터 표에서 읽습니다. null이면 주문을 만들지 않습니다.",
+  "purchase_conversion": null,
+  "organic_visitors_per_day": null,
+  "external_visitors_per_day": null,
+  "ad_budget_monthly": null,
+  "ad_cpc": null,
+  "sales_start": "2027-01-01",
+  "ad_start": "2027-02-01",
+  "ad_months": 12
+}

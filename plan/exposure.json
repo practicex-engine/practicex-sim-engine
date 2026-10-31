@@ -1,0 +1,4 @@
+{
+  "_설명": "구색-수요 연결(D형, 신제품 노출형). 제안이며 근거 수치가 없어 기본은 꺼짐(0). 켜려면 대표님 확정 후 값을 바꿉니다. 모형은 engine/exposure.py 머리말 참고.",
+  "exposure": {"n_ref": 30, "gamma_org": 0, "gamma_ad": 0, "launch_boost": 0, "tau": 30}
+}

@@ -1,0 +1,60 @@
+name: engine-run
+
+# 엔진 수동 실행. 기본값은 dry_run=true(Notion에 아무것도 쓰지 않음).
+# 주의: GitHub는 workflow_dispatch(수동 실행 버튼)를 기본 브랜치(main)에 있는 파일만 보여 줍니다.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "status(읽기만) / init(시계 시작) / step(시계 전진)"
+        type: choice
+        options: [status, init, step]
+        default: status
+      seed:
+        description: "init 때만 필요한 난수 시드(정수). 임의 값을 채우지 않으므로 직접 입력"
+        type: string
+        required: false
+      dry_run:
+        description: "true면 Notion에 쓰지 않음"
+        type: boolean
+        default: true
+      force:
+        description: "이미 가동 중인 시계를 다시 시작(init 전용)"
+        type: boolean
+        default: false
+      now:
+        description: "시험용 현재 시각 덮어쓰기(ISO, 비우면 실제 시각)"
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: engine-run
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 실행
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          IN_ACTION: ${{ inputs.action }}
+          IN_SEED: ${{ inputs.seed }}
+          IN_DRY: ${{ inputs.dry_run }}
+          IN_FORCE: ${{ inputs.force }}
+          IN_NOW: ${{ inputs.now }}
+        run: |
+          args=("$IN_ACTION")
+          if [ -n "$IN_SEED" ]; then args+=(--seed "$IN_SEED"); fi
+          if [ "$IN_DRY" = "true" ]; then args+=(--dry-run); fi
+          if [ "$IN_FORCE" = "true" ]; then args+=(--force); fi
+          if [ -n "$IN_NOW" ]; then args+=(--now "$IN_NOW"); fi
+          python -m engine.sync "${args[@]}"
