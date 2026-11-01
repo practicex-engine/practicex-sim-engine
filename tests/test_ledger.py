@@ -173,3 +173,38 @@ class CategoryStockTests(unittest.TestCase):
         flat = [e for d in outs for e in d]
         self.assertTrue(any(e["type"] == "ledger_order" and e["cat"] for e in flat))
         self.assertTrue(any(e["type"] == "ledger_return" for e in flat))
+
+
+class ExternalMallTests(unittest.TestCase):
+    def _day(self, ext, fee_rate, disc=0.0):
+        from engine import ledger as lg
+        s = {"master_seed": 3, "ledger": lg.new_ledger()}
+        s["ledger"]["stock"] = 100
+        s["ledger"]["inv_value"] = 100 * 30000.0
+        ev = lg.process_day(s, {"external_fee_rate": fee_rate, "external_discount_rate": disc}, 100, 10, [], ext)
+        return s["ledger"], ev
+
+    def test_fee_only_on_external(self):
+        L0, _ = self._day(0, 0.30)
+        L1, ev = self._day(10, 0.30)
+        self.assertEqual(L0["tot"].get("fee", 0), 0)
+        self.assertEqual(L1["tot"]["fee"], 10 * round(129620 * 0.30))
+        self.assertEqual(L0["tot"]["orders"], L1["tot"]["orders"])
+        self.assertAlmostEqual(L0["cash"] - L1["cash"], L1["tot"]["fee"], places=6)
+        self.assertTrue(all(e["channel"] in ("무신사", "W컨셉") for e in ev if e["type"] == "ledger_order"))
+
+    def test_lookbook_paid_at_order(self):
+        from engine import ledger as lg
+        s = {"master_seed": 3, "ledger": lg.new_ledger()}
+        p = [{"id": "T", "order_vdate": "2026-11-01", "fabric": 0, "trims_labor": 0, "grading": 0, "qty": 10, "lookbook": 5000000}]
+        lg.process_day(s, {}, 0, 0, p)
+        self.assertEqual(s["ledger"]["cash"], lg.INITIAL_CASH - 5000000)
+
+    def test_refund_returns_fee(self):
+        from engine import ledger as lg
+        s = {"master_seed": 3, "ledger": lg.new_ledger()}
+        s["ledger"].update({"stock": 5, "inv_value": 150000.0})
+        s["ledger"]["returns"].append({"due": 0, "kind": "change_of_mind", "unit_cost": 30000.0, "paid": 129620, "fee": 38886, "channel": "무신사"})
+        before = s["ledger"]["cash"]
+        lg.process_day(s, {}, 0, 0, [])
+        self.assertAlmostEqual(s["ledger"]["cash"], before - 129620 + 38886, places=6)

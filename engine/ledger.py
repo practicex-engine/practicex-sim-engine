@@ -38,7 +38,7 @@ def new_ledger():
 
 
 def _blank_month():
-    return {"revenue": 0, "orders": 0, "lost": 0, "refund": 0, "shipping": 0, "purchases": 0, "payables_paid": 0, "warnings": 0, "ad_spend": 0}
+    return {"revenue": 0, "orders": 0, "lost": 0, "refund": 0, "shipping": 0, "purchases": 0, "payables_paid": 0, "warnings": 0, "ad_spend": 0, "fee": 0}
 
 
 def _split(total, mix):
@@ -103,7 +103,7 @@ def _pay(L, amount, label, index, events, kind):
     events.append({"type": "ledger_cash", "kind": kind, "label": label, "amount": -amount, "cash_after": L["cash"]})
 
 
-def process_day(state, params, index, orders, purchases):
+def process_day(state, params, index, orders, purchases, ext_orders=0):
     """하루치 장부를 처리하고 사건 목록을 돌려준다. orders는 그날 수요 주문 수."""
     L = state.setdefault("ledger", new_ledger())
     events = []
@@ -111,6 +111,8 @@ def process_day(state, params, index, orders, purchases):
     crng = day_rng(state["master_seed"], index, "cat")
     _ensure_cats(L, purchases)
     aov = float(params.get("aov", DEFAULT_AOV))
+    fee_rate = float(params.get("external_fee_rate", 0.0))
+    disc = float(params.get("external_discount_rate", 0.0))
     rr = float(params.get("return_rate", DEFAULT_RETURN_RATE))
     day = clock.vdate(index)
 
@@ -121,6 +123,8 @@ def process_day(state, params, index, orders, purchases):
         L["po_done"].append(p["id"])
         odate = date.fromisoformat(p["order_vdate"])
         oidx = _idx(odate)
+        if p.get("lookbook"):
+            _pay(L, int(p["lookbook"]), "%s 룩북 촬영비(발주 시 지급)" % p["id"], index, events, "purchase")
         if p.get("fabric"):
             _pay(L, int(p["fabric"]), "%s 원단(발주 시 지급)" % p["id"], index, events, "purchase")
         due = next_month_10th_idx(odate)
@@ -163,24 +167,34 @@ def process_day(state, params, index, orders, purchases):
     for r in L["returns"]:
         if r["due"] <= index:  # 누락된 날의 환불도 다음 처리일에 처리
             if r["kind"] == "change_of_mind":
-                refund = int(round(aov)) - ROUND_TRIP
+                paid = int(round(r.get("paid", aov)))
+                refund = paid - ROUND_TRIP
                 L["cash"] -= refund + ROUND_TRIP  # 환불 + 본사가 낸 왕복 택배비(환불액에서 차감 = 고객 부담)
-                L["tot"]["refund"] += int(round(aov))
-                L["month"]["refund"] += int(round(aov))
+                L["tot"]["refund"] += paid
+                L["month"]["refund"] += paid
+                if r.get("fee"):  # 해석: 외부몰은 환불 건의 수수료를 돌려준다(정산 조건 미확인)
+                    L["cash"] += r["fee"]
+                    L["tot"]["fee"] = L["tot"].get("fee", 0) - r["fee"]
+                    L["month"]["fee"] = L["month"].get("fee", 0) - r["fee"]
                 L["stock"] += 1
                 L["inv_value"] += r["unit_cost"]
                 cat = r.get("cat") or _pick_cat(L, crng)
                 if cat and L.get("cat_stock") is not None:
                     L["cat_stock"][cat] = L["cat_stock"].get(cat, 0) + 1
                 rseq += 1
-                events.append({"type": "ledger_return", "seq": rseq, "kind": "change_of_mind", "cat": cat, "amount": int(round(aov))})
+                events.append({"type": "ledger_return", "seq": rseq, "kind": "change_of_mind", "cat": cat, "amount": paid, "channel": r.get("channel", "자사몰")})
             else:  # 불량: 전액 환불 + 왕복 택배비 본사 부담, 폐기
-                L["cash"] -= int(round(aov)) + ROUND_TRIP
-                L["tot"]["refund"] += int(round(aov))
-                L["month"]["refund"] += int(round(aov))
+                paid = int(round(r.get("paid", aov)))
+                L["cash"] -= paid + ROUND_TRIP
+                L["tot"]["refund"] += paid
+                L["month"]["refund"] += paid
+                if r.get("fee"):
+                    L["cash"] += r["fee"]
+                    L["tot"]["fee"] = L["tot"].get("fee", 0) - r["fee"]
+                    L["month"]["fee"] = L["month"].get("fee", 0) - r["fee"]
                 L["tot"]["discard"] += 1
                 rseq += 1
-                events.append({"type": "ledger_return", "seq": rseq, "kind": "defect", "cat": r.get("cat"), "amount": int(round(aov))})
+                events.append({"type": "ledger_return", "seq": rseq, "kind": "defect", "cat": r.get("cat"), "amount": paid})
         else:
             keep.append(r)
     L["returns"] = keep
@@ -188,24 +202,34 @@ def process_day(state, params, index, orders, purchases):
     # 5) 판매: 재고 한도 안에서만 체결
     fill = min(orders, L["stock"])
     lost = orders - fill
-    for _ in range(fill):
+    ext_orders = max(0, min(int(ext_orders), orders))
+    chans = ["own"] * (orders - ext_orders) + ["ext"] * ext_orders
+    crng.shuffle(chans)  # 재고가 모자랄 때 어느 채널 주문이 체결되는지는 무작위(별도 난수열)
+    for k in range(fill):
         unit_cost = L["inv_value"] / L["stock"]
         L["stock"] -= 1
         L["inv_value"] -= unit_cost
         L["tot"]["cogs"] += unit_cost
-        L["cash"] += int(round(aov)) - SHIPPING
-        L["month"]["revenue"] += int(round(aov))
+        ext = chans[k] == "ext"
+        mall = crng.choice(["무신사", "W컨셉"]) if ext else "자사몰"  # 제안: 두 몰에 반반
+        price = int(round(aov * (1 - disc))) if ext else int(round(aov))
+        fee = int(round(price * fee_rate)) if ext else 0
+        L["cash"] += price - fee - SHIPPING
+        L["month"]["revenue"] += price
         L["month"]["shipping"] += SHIPPING
-        L["tot"]["revenue"] += int(round(aov))
+        L["tot"]["revenue"] += price
+        if fee:
+            L["tot"]["fee"] = L["tot"].get("fee", 0) + fee
+            L["month"]["fee"] = L["month"].get("fee", 0) + fee
         cat = _pick_cat(L, crng)
         if cat:
             L["cat_stock"][cat] -= 1
-        events.append({"type": "ledger_order", "seq": _ + 1, "cat": cat, "price": int(round(aov))})
+        events.append({"type": "ledger_order", "seq": k + 1, "cat": cat, "price": price, "channel": mall, "fee": fee})
         u = rng.random()
         if u < rr:
-            L["returns"].append({"due": index + RETURN_DELAY, "kind": "change_of_mind", "unit_cost": unit_cost, "cat": cat})
+            L["returns"].append({"due": index + RETURN_DELAY, "kind": "change_of_mind", "unit_cost": unit_cost, "cat": cat, "paid": price, "fee": fee, "channel": mall})
         elif u < rr + DEFECT_RATE:
-            L["returns"].append({"due": index + RETURN_DELAY, "kind": "defect", "unit_cost": unit_cost, "cat": cat})
+            L["returns"].append({"due": index + RETURN_DELAY, "kind": "defect", "unit_cost": unit_cost, "cat": cat, "paid": price, "fee": fee, "channel": mall})
     L["tot"]["orders"] += fill
     L["tot"]["lost"] += lost
     L["month"]["orders"] += fill
@@ -238,7 +262,7 @@ def _month_event(state, d, approvals):
         "revenue": m["revenue"], "orders": m["orders"], "lost": m["lost"], "refund": m["refund"],
         "cash": int(round(L["cash"])), "stock": L["stock"], "warnings": m["warnings"],
         "payables_open": sum(x["amount"] for x in L["payables"]),
-        "purchases_paid": m["purchases"], "ad_spend": m.get("ad_spend", 0), "payables_paid": m["payables_paid"],
+        "purchases_paid": m["purchases"], "ad_spend": m.get("ad_spend", 0), "fee": m.get("fee", 0), "payables_paid": m["payables_paid"],
         "approvals": [a for a in approvals if a["vdate"][:7] == ym],
     }
     L["month"] = _blank_month()

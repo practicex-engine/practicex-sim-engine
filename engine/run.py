@@ -45,7 +45,8 @@ def process_day(state, params, index):
     events += adstats.pre_day(state, dem, index)
     L0 = state["ledger"]["tot"]
     rev0, ord0 = L0["revenue"], L0["orders"]
-    events += ledger.process_day(state, params, index, orders, params.get("purchases", []))
+    ext = sum(e.get("by_channel", {}).get("external", {}).get("orders", 0) for e in dem if e["type"] == "demand_day")
+    events += ledger.process_day(state, params, index, orders, params.get("purchases", []), ext)
     L1 = state["ledger"]["tot"]
     adstats.post_day(state, dem, L1["revenue"] - rev0, L1["orders"] - ord0, index)
     events += ledger.close_month(state, index, params.get("approvals", []))

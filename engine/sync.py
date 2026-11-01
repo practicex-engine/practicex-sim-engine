@@ -35,6 +35,7 @@ PARAM_MAP = (
     ("외부몰 유입 방문자", "external_visitors_per_day", 1.0),
     ("광고비 (월)", "ad_budget_monthly", 1.0),
     ("광고 CPC 가정", "ad_cpc", 1.0),
+    ("외부몰 기본 수수료 (무신사, W컨셉)", "external_fee_rate", 0.01),  # 확정 30%, 환불 시 수수료 반환은 해석
 )
 REQUIRED_KEYS = ("purchase_conversion",)  # 없으면 주문을 만들지 않음
 # 날짜·기간 값은 확정/제안 문서값이라 코드에 둔다. 바꾸면 이 줄과 지침을 같이 고친다.
@@ -239,11 +240,11 @@ def write_events(client, events, now):
             n_self = len([a for a in e["approvals"] if a.get("self", True)])
             appr_names = " / ".join(a["id"] + " " + a["title"] for a in e["approvals"])
             summary = ("매출 %s원, 체결 %d건, 재고부족 미체결 %d건, 환불 %s원, 현금 %s원, 재고 %d장, 미지급 %s원. "
-                       "발주 지급 %s원, 후불 지급 %s원, 광고비 %s원. 자체 승인 %d건, 이달 기록된 지시·승인 %d건%s. "
+                       "발주 지급 %s원, 후불 지급 %s원, 광고비 %s원, 외부몰 수수료 %s원. 자체 승인 %d건, 이달 기록된 지시·승인 %d건%s. "
                        "팀 연결 전이라 발주는 plan/purchases.json에 있는 것만 반영.%s"
                        % (format(e["revenue"], ","), e["orders"], e["lost"], format(e["refund"], ","), format(e["cash"], ","), e["stock"],
                           format(e["payables_open"], ","), format(e["purchases_paid"], ","), format(e["payables_paid"], ","),
-                          format(e.get("ad_spend", 0), ","), n_self, len(e["approvals"]),
+                          format(e.get("ad_spend", 0), ","), format(e.get("fee", 0), ","), n_self, len(e["approvals"]),
                           (": " + appr_names) if e["approvals"] else "",
                           " (월말 날이 누락돼 늦게 마감)" if e.get("late") else ""))
             appr_txt = "\n".join("[%s] %s | 근거: %s | 바꾼 확정 사항: %s | 한계: %s | 전문: %s" % (a["id"], a["title"], a["basis"], a["overrides"], a["limits"], a["report"]) for a in e["approvals"]) or "없음"
@@ -291,11 +292,12 @@ def write_events(client, events, now):
                 "주문번호": _title(title),
                 "가상 날짜": {"date": {"start": d}},
                 "상태": {"select": {"name": "주문" if is_o else "반품"}},
-                "채널": {"select": {"name": "자사몰"}},
+                "채널": {"select": {"name": e.get("channel") or "자사몰"}},
                 "품번": {"rich_text": nt.rich("복종: %s" % (e.get("cat") or "미분류"))},
                 "수량": {"number": 1},
                 "판매가(원)": {"number": e.get("price", e.get("amount", 0))},
                 "정상가(원)": {"number": e.get("price", e.get("amount", 0))},
+                "수수료(원)": {"number": e.get("fee", 0)},
                 "SIM": {"checkbox": True},
             }
             try:
