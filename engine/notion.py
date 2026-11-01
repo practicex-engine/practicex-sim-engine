@@ -94,6 +94,9 @@ class Client:
     def update_page(self, page_id, properties):
         return self._request("PATCH", "/v1/pages/%s" % page_id, {"properties": properties})
 
+    def archive_page(self, page_id):
+        return self._request("PATCH", "/v1/pages/%s" % page_id, {"archived": True})
+
     def create_page(self, db_id, properties):
         return self._request("POST", "/v1/pages", {"parent": {"database_id": db_id}, "properties": properties})
 

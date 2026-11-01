@@ -201,3 +201,29 @@ class SyncTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResetTests(unittest.TestCase):
+    def test_reset_archives_only_record_tables(self):
+        from engine import sync, notion as nt
+
+        class C:
+            def __init__(s):
+                s.q, s.arch = [], []
+
+            def query_all(s, db, filter=None):
+                s.q.append(db)
+                return [{"id": db + "-1"}, {"id": db + "-2"}]
+
+            def archive_page(s, pid):
+                s.arch.append(pid)
+
+        c = C()
+        out = sync.cmd_reset(c, dry_run=False)
+        self.assertEqual(set(out["archived"]), set(sync.RESET_DBS))
+        self.assertNotIn(nt.DB["state"], c.q)
+        self.assertNotIn(nt.DB["params"], c.q)
+        self.assertEqual(len(c.arch), 2 * len(sync.RESET_DBS))
+        c2 = C()
+        sync.cmd_reset(c2, dry_run=True)
+        self.assertEqual(c2.arch, [])

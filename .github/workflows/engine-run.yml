@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: "status(읽기만) / init(시계 시작) / step(시계 전진)"
+        description: "status(읽기만) / init(시계 시작) / step(시계 전진) / reset(SIM 기록 표 보관 처리)"
         type: choice
-        options: [status, init, step]
+        options: [status, init, step, reset]
         default: status
       seed:
         description: "init 때만 필요한 난수 시드(정수). 임의 값을 채우지 않으므로 직접 입력"

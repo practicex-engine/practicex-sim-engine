@@ -39,7 +39,8 @@ PARAM_MAP = (
 )
 REQUIRED_KEYS = ("purchase_conversion",)  # 없으면 주문을 만들지 않음
 # 날짜·기간 값은 확정/제안 문서값이라 코드에 둔다. 바꾸면 이 줄과 지침을 같이 고친다.
-FIXED_ENGINE_PARAMS = {"sales_start": "2027-01-01", "ad_start": "2027-02-01", "ad_months": 12}
+# 판매 시작: 첫 입고(S/S 발주 2027-01-31 + 30일 = 2027-03-02) 이후, 설계 일정의 S/S 첫 판매일 2027-03-15(대표님 지시 2026-11-01 '입고 이후', 날짜 선택은 해석)
+FIXED_ENGINE_PARAMS = {"sales_start": "2027-03-15", "ad_start": "2027-02-01", "ad_months": 12}
 
 
 def parse_now(s):
@@ -394,6 +395,22 @@ def cmd_init(client, seed, now, dry_run, force):
     return plan
 
 
+RESET_DBS = ("demand_log", "orders", "anomalies", "errors", "reports")
+
+
+def cmd_reset(client, dry_run):
+    """다시 돌리기 전에 SIM 기록 표(수요 로그, 주문 원장, 이상 상황, 오류, 레포트)의 행을 보관 처리(archive)한다.
+    상태 표와 파라미터 표는 건드리지 않는다. 삭제가 아니라 보관이라 Notion 휴지통에서 복구할 수 있다."""
+    out = {"action": "reset", "dry_run": dry_run, "archived": {}}
+    for db in RESET_DBS:
+        rows = client.query_all(nt.DB[db])
+        out["archived"][db] = len(rows)
+        if not dry_run:
+            for r in rows:
+                client.archive_page(r["id"])
+    return out
+
+
 def cmd_step(client, now, dry_run):
     state, status, ids = load(client)
     if status != "가동":
@@ -430,7 +447,7 @@ def cmd_step(client, now, dry_run):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="engine.sync")
-    ap.add_argument("cmd", choices=["status", "init", "step"])
+    ap.add_argument("cmd", choices=["status", "init", "step", "reset"])
     ap.add_argument("--seed", type=int)
     ap.add_argument("--now")
     ap.add_argument("--dry-run", action="store_true")
@@ -446,6 +463,8 @@ def main(argv=None):
                 print("실패: init에는 --seed가 필요합니다(임의 값을 채우지 않습니다).")
                 return 2
             out = cmd_init(client, a.seed, now, a.dry_run, a.force)
+        elif a.cmd == "reset":
+            out = cmd_reset(client, a.dry_run)
         else:
             out = cmd_step(client, now, a.dry_run)
     except nt.NotionError as e:
