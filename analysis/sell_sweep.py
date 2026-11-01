@@ -5,7 +5,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine import clock, run, state as st, sync
 
 BASE = {"purchase_conversion": 0.0133, "organic_visitors_per_day": 30, "external_visitors_per_day": 50,
-        "ad_budget_monthly": 500000, "ad_cpc": 700}
+        "ad_budget_monthly": 500000, "ad_cpc": 700, "external_fee_rate": 0.30}
 
 def go(over, seed=20261101):
     params = dict(BASE); params.update(sync.FIXED_ENGINE_PARAMS)
