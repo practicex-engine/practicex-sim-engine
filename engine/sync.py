@@ -284,6 +284,24 @@ def write_events(client, events, now):
                 n += _write_once(client, "reports", "레포트", title, props)
             except nt.NotionError as ex:
                 write_log(client, "마감 광고 효율 보고 쓰기 실패", str(ex)[:500], "오류", now, d)
+        elif e["type"] in ("ledger_order", "ledger_return"):
+            is_o = e["type"] == "ledger_order"
+            title = "SIM-%s-%s%02d" % (d, "" if is_o else "R", e.get("seq", 0))
+            props = {
+                "주문번호": _title(title),
+                "가상 날짜": {"date": {"start": d}},
+                "상태": {"select": {"name": "주문" if is_o else "반품"}},
+                "채널": {"select": {"name": "자사몰"}},
+                "품번": {"rich_text": nt.rich("복종: %s" % (e.get("cat") or "미분류"))},
+                "수량": {"number": 1},
+                "판매가(원)": {"number": e.get("price", e.get("amount", 0))},
+                "정상가(원)": {"number": e.get("price", e.get("amount", 0))},
+                "SIM": {"checkbox": True},
+            }
+            try:
+                n += _write_once(client, "orders", "주문번호", title, props)
+            except nt.NotionError as ex:
+                write_log(client, "주문 원장 쓰기 실패 %s" % d, str(ex)[:300], "경고", now, d)
         elif e["type"] == "cash_negative":
             title = "현금 부족 (SIM) %s" % d[:7]
             props = {

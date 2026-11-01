@@ -41,6 +41,52 @@ def _blank_month():
     return {"revenue": 0, "orders": 0, "lost": 0, "refund": 0, "shipping": 0, "purchases": 0, "payables_paid": 0, "warnings": 0, "ad_spend": 0}
 
 
+def _split(total, mix):
+    """total장을 복종 비율(mix)대로 정수로 나눈다(최대잔여법). 합은 항상 total."""
+    keys = [k for k in mix if mix[k] > 0]
+    s = float(sum(mix[k] for k in keys)) or 1.0
+    raw = {k: total * mix[k] / s for k in keys}
+    out = {k: int(raw[k]) for k in keys}
+    left = total - sum(out.values())
+    for k in sorted(keys, key=lambda k: (raw[k] - out[k], k), reverse=True)[:left]:
+        out[k] += 1
+    return out
+
+
+def _mix_of(purchases, pid=None):
+    for p in purchases:
+        if p.get("mix") and (pid is None or p["id"] == pid):
+            return p["mix"]
+    return None
+
+
+def _ensure_cats(L, purchases):
+    """복종별 재고(표시용). 총재고와 어긋나거나 없으면 첫 발주의 복종 비율로 다시 나눈다(해석)."""
+    cs = L.get("cat_stock")
+    if cs is not None and sum(cs.values()) == L["stock"]:
+        return
+    mix = _mix_of(purchases)
+    if not mix:
+        return
+    L["cat_stock"] = _split(L["stock"], mix) if L["stock"] else {k: 0 for k in mix}
+
+
+def _pick_cat(L, rng):
+    cs = L.get("cat_stock")
+    if not cs:
+        return None
+    tot = sum(cs.values())
+    if tot <= 0:
+        return None
+    u = rng.random() * tot
+    acc = 0
+    for k in sorted(cs):
+        acc += cs[k]
+        if u < acc and cs[k] > 0:
+            return k
+    return max(cs, key=cs.get)
+
+
 def _idx(d):
     return (d - clock.START).days
 
@@ -62,6 +108,8 @@ def process_day(state, params, index, orders, purchases):
     L = state.setdefault("ledger", new_ledger())
     events = []
     rng = day_rng(state["master_seed"], index, "ledger")
+    crng = day_rng(state["master_seed"], index, "cat")
+    _ensure_cats(L, purchases)
     aov = float(params.get("aov", DEFAULT_AOV))
     rr = float(params.get("return_rate", DEFAULT_RETURN_RATE))
     day = clock.vdate(index)
@@ -80,7 +128,7 @@ def process_day(state, params, index, orders, purchases):
             if p.get(key):
                 L["payables"].append({"due": due, "amount": int(p[key]), "label": "%s %s" % (p["id"], label)})
         total = int(p.get("fabric", 0)) + int(p.get("trims_labor", 0)) + int(p.get("grading", 0))
-        L["arrivals"].append({"idx": oidx + PRODUCTION_DAYS, "qty": int(p["qty"]), "cost": total, "id": p["id"]})
+        L["arrivals"].append({"idx": oidx + PRODUCTION_DAYS, "qty": int(p["qty"]), "cost": total, "id": p["id"], "mix": p.get("mix")})
         events.append({"type": "ledger_po", "id": p["id"], "qty": int(p["qty"]), "total_cost": total})
 
     # 2) 후불 대금 지급
@@ -100,6 +148,10 @@ def process_day(state, params, index, orders, purchases):
             usable = a["qty"] - bad
             L["stock"] += usable
             L["inv_value"] += a["cost"]
+            if a.get("mix"):
+                cs = L.setdefault("cat_stock", {})
+                for k, v in _split(usable, a["mix"]).items():
+                    cs[k] = cs.get(k, 0) + v
             events.append({"type": "ledger_receipt", "id": a["id"], "qty": a["qty"], "defect_discarded": bad, "usable": usable})
         else:
             keep.append(a)
@@ -107,6 +159,7 @@ def process_day(state, params, index, orders, purchases):
 
     # 4) 반품 처리(7일 전에 팔린 건)
     keep = []
+    rseq = 0
     for r in L["returns"]:
         if r["due"] <= index:  # 누락된 날의 환불도 다음 처리일에 처리
             if r["kind"] == "change_of_mind":
@@ -116,11 +169,18 @@ def process_day(state, params, index, orders, purchases):
                 L["month"]["refund"] += int(round(aov))
                 L["stock"] += 1
                 L["inv_value"] += r["unit_cost"]
+                cat = r.get("cat") or _pick_cat(L, crng)
+                if cat and L.get("cat_stock") is not None:
+                    L["cat_stock"][cat] = L["cat_stock"].get(cat, 0) + 1
+                rseq += 1
+                events.append({"type": "ledger_return", "seq": rseq, "kind": "change_of_mind", "cat": cat, "amount": int(round(aov))})
             else:  # 불량: 전액 환불 + 왕복 택배비 본사 부담, 폐기
                 L["cash"] -= int(round(aov)) + ROUND_TRIP
                 L["tot"]["refund"] += int(round(aov))
                 L["month"]["refund"] += int(round(aov))
                 L["tot"]["discard"] += 1
+                rseq += 1
+                events.append({"type": "ledger_return", "seq": rseq, "kind": "defect", "cat": r.get("cat"), "amount": int(round(aov))})
         else:
             keep.append(r)
     L["returns"] = keep
@@ -137,11 +197,15 @@ def process_day(state, params, index, orders, purchases):
         L["month"]["revenue"] += int(round(aov))
         L["month"]["shipping"] += SHIPPING
         L["tot"]["revenue"] += int(round(aov))
+        cat = _pick_cat(L, crng)
+        if cat:
+            L["cat_stock"][cat] -= 1
+        events.append({"type": "ledger_order", "seq": _ + 1, "cat": cat, "price": int(round(aov))})
         u = rng.random()
         if u < rr:
-            L["returns"].append({"due": index + RETURN_DELAY, "kind": "change_of_mind", "unit_cost": unit_cost})
+            L["returns"].append({"due": index + RETURN_DELAY, "kind": "change_of_mind", "unit_cost": unit_cost, "cat": cat})
         elif u < rr + DEFECT_RATE:
-            L["returns"].append({"due": index + RETURN_DELAY, "kind": "defect", "unit_cost": unit_cost})
+            L["returns"].append({"due": index + RETURN_DELAY, "kind": "defect", "unit_cost": unit_cost, "cat": cat})
     L["tot"]["orders"] += fill
     L["tot"]["lost"] += lost
     L["month"]["orders"] += fill

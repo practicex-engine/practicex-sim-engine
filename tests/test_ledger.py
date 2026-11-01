@@ -131,3 +131,45 @@ class CatchUpTests(unittest.TestCase):
         self.assertEqual(late[0]["month"], "2026-11")
         self.assertTrue(late[0]["late"])
         self.assertEqual(late[0]["end"], "2026-11-30")
+
+
+class CategoryStockTests(unittest.TestCase):
+    """복종별 재고는 표시용이다: 합이 총재고와 같고, 체결·현금은 복종 기능 유무와 무관해야 한다."""
+
+    MIX = {"티셔츠·탑": 24, "팬츠": 18, "코트·패딩": 0, "원피스": 7}
+
+    def _run(self, with_mix, days=120):
+        import copy
+        from engine import ledger as lg
+        purchases = [{"id": "T1", "order_vdate": "2026-11-01", "fabric": 1000000, "trims_labor": 2000000, "grading": 100000, "qty": 500}]
+        if with_mix:
+            purchases[0]["mix"] = dict(self.MIX)
+        state = {"master_seed": 7}
+        outs = []
+        for i in range(days):
+            ev = lg.process_day(state, {}, i, 3, copy.deepcopy(purchases))
+            outs.append(ev)
+        return state, outs
+
+    def test_sum_matches_stock_and_totals_unchanged(self):
+        s1, _ = self._run(True)
+        s0, _ = self._run(False)
+        L = s1["ledger"]
+        self.assertEqual(sum(L["cat_stock"].values()), L["stock"])
+        self.assertEqual(L["cat_stock"].get("코트·패딩", 0), 0)
+        for k in ("cash", "stock", "inv_value"):
+            self.assertAlmostEqual(L[k], s0["ledger"][k], places=6)
+        self.assertEqual(L["tot"], s0["ledger"]["tot"])
+
+    def test_migration_from_state_without_cat_stock(self):
+        from engine import ledger as lg
+        s, _ = self._run(True, days=60)
+        del s["ledger"]["cat_stock"]
+        lg.process_day(s, {}, 60, 0, [{"id": "T1", "order_vdate": "2026-11-01", "qty": 500, "mix": dict(self.MIX)}])
+        self.assertEqual(sum(s["ledger"]["cat_stock"].values()), s["ledger"]["stock"])
+
+    def test_order_and_return_events(self):
+        _, outs = self._run(True)
+        flat = [e for d in outs for e in d]
+        self.assertTrue(any(e["type"] == "ledger_order" and e["cat"] for e in flat))
+        self.assertTrue(any(e["type"] == "ledger_return" for e in flat))
