@@ -178,6 +178,7 @@ def process_day(state, params, index, orders, purchases, ext_orders=0):
                     L["month"]["fee"] = L["month"].get("fee", 0) - r["fee"]
                 L["stock"] += 1
                 L["inv_value"] += r["unit_cost"]
+                L["tot"]["cogs"] -= r["unit_cost"]  # 재판매하는 반품은 매출원가에서 되돌린다
                 cat = r.get("cat") or _pick_cat(L, crng)
                 if cat and L.get("cat_stock") is not None:
                     L["cat_stock"][cat] = L["cat_stock"].get(cat, 0) + 1

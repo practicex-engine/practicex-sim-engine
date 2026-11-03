@@ -208,3 +208,14 @@ class ExternalMallTests(unittest.TestCase):
         before = s["ledger"]["cash"]
         lg.process_day(s, {}, 0, 0, [])
         self.assertAlmostEqual(s["ledger"]["cash"], before - 129620 + 38886, places=6)
+
+
+class CogsReturnTests(unittest.TestCase):
+    def test_restocked_return_reverses_cogs(self):
+        from engine import ledger as lg
+        s = {"master_seed": 3, "ledger": lg.new_ledger()}
+        s["ledger"].update({"stock": 5, "inv_value": 150000.0})
+        s["ledger"]["tot"]["cogs"] = 30000.0
+        s["ledger"]["returns"].append({"due": 0, "kind": "change_of_mind", "unit_cost": 30000.0, "paid": 129620, "fee": 0})
+        lg.process_day(s, {}, 0, 0, [])
+        self.assertAlmostEqual(s["ledger"]["tot"]["cogs"], 0.0, places=6)

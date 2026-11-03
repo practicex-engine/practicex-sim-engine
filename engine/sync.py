@@ -145,6 +145,10 @@ def load(client):
     }
     if "ledger" in inner:
         state["ledger"] = inner["ledger"]
+    if "adstats" in inner:
+        state["adstats"] = inner["adstats"]
+    if inner.get("last_run"):
+        state["last_run"] = inner["last_run"]  # 분 단위로 잘린 날짜 칸 값보다 정확하다
     ids = {k: by[k]["id"] for k in (K_CLOCK, K_SEED, K_CARRY, K_JSON) if k in by}
     return state, status, ids
 
@@ -167,7 +171,9 @@ def _clock_props(state, status):
 def _inner_json(state):
     return json.dumps(
         {"pending_pos": state["pending_pos"], "warnings": state["warnings"], "missed_days": state["missed_days"],
-         **({"ledger": state["ledger"]} if "ledger" in state else {})},
+         "last_run": state.get("last_run"),  # Notion 날짜 칸은 분 단위로 잘려 매 실행마다 초가 중복 계산되므로 정확한 시각을 여기에도 둔다
+         **({"ledger": state["ledger"]} if "ledger" in state else {}),
+         **({"adstats": state["adstats"]} if "adstats" in state else {})},
         ensure_ascii=False,
     )
 
@@ -314,6 +320,17 @@ def write_events(client, events, now):
                 "담당 팀": {"select": {"name": "재무회계"}},
                 "처리 상태": {"select": {"name": "발생"}},
                 "내용": {"rich_text": nt.rich("현금 잔액 %s원" % format(e["cash"], ","))},
+            }
+            n += _write_once(client, "anomalies", "상황", title, props)
+        elif e["type"] == "ledger_receipt" and e["defect_discarded"] > 0:
+            title = "입고 불량 폐기 %s %s (SIM)" % (e["id"], d)
+            props = {
+                "상황": _title(title),
+                "가상 날짜": {"date": {"start": d}},
+                "유형": {"select": {"name": "불량"}},
+                "담당 팀": {"select": {"name": "생산·구매"}},
+                "처리 상태": {"select": {"name": "발생"}},
+                "내용": {"rich_text": nt.rich("입고 %d장 중 %d장 폐기" % (e["qty"], e["defect_discarded"]))},
             }
             n += _write_once(client, "anomalies", "상황", title, props)
         elif e["type"] == "delivery" and e["defect_discarded"] > 0:

@@ -227,3 +227,13 @@ class ResetTests(unittest.TestCase):
         c2 = C()
         sync.cmd_reset(c2, dry_run=True)
         self.assertEqual(c2.arch, [])
+
+
+class StatePrecisionTests(unittest.TestCase):
+    def test_inner_json_keeps_exact_last_run_and_adstats(self):
+        from engine import sync
+        st = {"pending_pos": [], "warnings": [], "missed_days": [], "last_run": "2026-11-02T10:12:47+09:00",
+              "adstats": {"spend": 5}, "ledger": {"cash": 1}}
+        inner = json.loads(sync._inner_json(st))
+        self.assertEqual(inner["last_run"], "2026-11-02T10:12:47+09:00")
+        self.assertEqual(inner["adstats"], {"spend": 5})
