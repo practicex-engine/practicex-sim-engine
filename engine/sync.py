@@ -91,6 +91,11 @@ def load_exposure(path=EXPOSURE_PATH):
         return json.load(f).get("exposure")
 
 
+def load_catalog():
+    from . import catalog
+    return catalog.load()
+
+
 def to_engine_params(notion_params):
     out = {}
     for name, key, scale in PARAM_MAP:
@@ -106,6 +111,9 @@ def to_engine_params(notion_params):
     ex = load_exposure()
     if ex:
         out["exposure"] = ex
+    cat = load_catalog()
+    if cat:
+        out["catalog"] = cat
     return out
 
 
@@ -247,11 +255,11 @@ def write_events(client, events, now):
             n_self = len([a for a in e["approvals"] if a.get("self", True)])
             appr_names = " / ".join(a["id"] + " " + a["title"] for a in e["approvals"])
             summary = ("매출 %s원, 체결 %d건, 재고부족 미체결 %d건, 환불 %s원, 현금 %s원, 재고 %d장, 미지급 %s원. "
-                       "발주 지급 %s원, 후불 지급 %s원, 광고비 %s원, 외부몰 수수료 %s원. 자체 승인 %d건, 이달 기록된 지시·승인 %d건%s. "
+                       "발주 지급 %s원, 후불 지급 %s원, 광고비 %s원, 외부몰 수수료 %s원, PG 수수료 %s원, 인건비 %s원, 리오더 발주 %s원. 자체 승인 %d건, 이달 기록된 지시·승인 %d건%s. "
                        "팀 연결 전이라 발주는 plan/purchases.json에 있는 것만 반영.%s"
                        % (format(e["revenue"], ","), e["orders"], e["lost"], format(e["refund"], ","), format(e["cash"], ","), e["stock"],
                           format(e["payables_open"], ","), format(e["purchases_paid"], ","), format(e["payables_paid"], ","),
-                          format(e.get("ad_spend", 0), ","), format(e.get("fee", 0), ","), n_self, len(e["approvals"]),
+                          format(e.get("ad_spend", 0), ","), format(e.get("fee", 0), ","), format(e.get("pg", 0), ","), format(e.get("labor", 0), ","), format(e.get("reorder", 0), ","), n_self, len(e["approvals"]),
                           (": " + appr_names) if e["approvals"] else "",
                           " (월말 날이 누락돼 늦게 마감)" if e.get("late") else ""))
             appr_txt = "\n".join("[%s] %s | 근거: %s | 바꾼 확정 사항: %s | 한계: %s | 전문: %s" % (a["id"], a["title"], a["basis"], a["overrides"], a["limits"], a["report"]) for a in e["approvals"]) or "없음"
@@ -303,7 +311,7 @@ def write_events(client, events, now):
                 "품번": {"rich_text": nt.rich("복종: %s" % (e.get("cat") or "미분류"))},
                 "수량": {"number": 1},
                 "판매가(원)": {"number": e.get("price", e.get("amount", 0))},
-                "정상가(원)": {"number": e.get("price", e.get("amount", 0))},
+                "정상가(원)": {"number": e.get("list", e.get("price", e.get("amount", 0)))},
                 "수수료(원)": {"number": e.get("fee", 0)},
                 "SIM": {"checkbox": True},
             }

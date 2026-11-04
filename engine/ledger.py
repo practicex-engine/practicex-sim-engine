@@ -10,13 +10,15 @@
 - 주문 1건 = 상품 1장, 결제액 = 객단가(정상가 기준, 할인 미반영). [해석]
 - 재고가 모자라면 그 주문은 체결되지 않고 사라진다(백오더 없음). [제안]
 - 변심 반품은 판매 후 7일에 환불된다. 불량 반품도 같다. [제안, 미확인]
-- PG 수수료는 값을 확인하지 못해 0으로 둔다. 외부몰 수수료·정산 지연도 반영하지 않는다. [미확인]
+- PG 수수료: catalog가 있으면 자사몰 결제액의 pg_rate(제안 3.4%)를 뺀다. 없으면 0. 정산 지연은 반영하지 않는다. [제안/미확인]
+- v0.9: params["catalog"](plan/catalog.json)가 있으면 복종별 판매가, 시즌 인기 비율, 재고 연동 할인, 35% 리오더, 최저임금 인건비를 쓴다(engine/catalog.py).
 - 객단가 기본값 129,620원은 연간 200스타일 가중 평균(제안).
 - 발주는 plan/purchases.json에 있는 것만 반영한다. 없으면 재고가 없어 매출도 없다.
 """
+import math
 from datetime import date
 
-from . import clock
+from . import catalog, clock
 from .rng import day_rng
 from .supply import defect_count, DEFECT_RATE
 
@@ -38,7 +40,7 @@ def new_ledger():
 
 
 def _blank_month():
-    return {"revenue": 0, "orders": 0, "lost": 0, "refund": 0, "shipping": 0, "purchases": 0, "payables_paid": 0, "warnings": 0, "ad_spend": 0, "fee": 0}
+    return {"revenue": 0, "orders": 0, "lost": 0, "refund": 0, "shipping": 0, "purchases": 0, "payables_paid": 0, "warnings": 0, "ad_spend": 0, "fee": 0, "pg": 0, "labor": 0, "reorder": 0}
 
 
 def _split(total, mix):
@@ -103,13 +105,167 @@ def _pay(L, amount, label, index, events, kind):
     events.append({"type": "ledger_cash", "kind": kind, "label": label, "amount": -amount, "cash_after": L["cash"]})
 
 
+def _count(x, rng):
+    n = int(x)
+    return n + (1 if rng.random() < x - n else 0)
+
+
+def _receive_cat(L, C, a, usable, index):
+    """복종별 실재고·재고가치 입고. 발주 원가는 복종 기준 총원가 비율로 나눈다(해석). 재고 나이는 평균 입고일로 섞는다."""
+    cs = L.setdefault("cat_stock", {})
+    cv = L.setdefault("cat_value", {})
+    meta = L.setdefault("cat_meta", {})
+    parts = {a["cat"]: usable} if a.get("cat") else _split(usable, a["mix"])
+    w = sum(q * C["categories"][k]["unit_cost"] for k, q in parts.items()) or 1.0
+    for k, q in parts.items():
+        old = cs.get(k, 0)
+        cs[k] = old + q
+        cv[k] = cv.get(k, 0.0) + a["cost"] * q * C["categories"][k]["unit_cost"] / w
+        m = meta.setdefault(k, {"base": 0, "idx": float(index), "reordered": False})
+        tot = old + q
+        m["idx"] = (old * m["idx"] + q * index) / tot if tot else float(index)
+        m["base"] = tot
+        if not a.get("cat"):
+            m["reordered"] = False
+
+
+def _draw_cat(rng, weights, stock, subst):
+    keys = sorted(k for k in weights if weights[k] > 0)
+    tot = sum(weights[k] for k in keys)
+    if tot <= 0:
+        return None
+    u, acc, c = rng.random() * tot, 0.0, keys[-1]
+    for k in keys:
+        acc += weights[k]
+        if u < acc:
+            c = k
+            break
+    if stock.get(c, 0) > 0:
+        return c
+    if rng.random() < subst:
+        av = [k for k in keys if stock.get(k, 0) > 0]
+        t2 = sum(weights[k] for k in av)
+        if t2 > 0:
+            u, acc = rng.random() * t2, 0.0
+            for k in av:
+                acc += weights[k]
+                if u < acc:
+                    return k
+            return av[-1]
+    return None
+
+
+def _sell_cat(L, params, C, purchases, index, day, orders, ext_orders, rng, crng, events):
+    """복종별 판매. 반환: (체결 수, 손실 수)."""
+    md = C["markdown"]
+    w = catalog.demand_weights(C, purchases, day)
+    wt = sum(w.values()) or 1.0
+    meta, cs, cv = L.setdefault("cat_meta", {}), L.setdefault("cat_stock", {}), L.setdefault("cat_value", {})
+    disc = {k: catalog.markdown_rate(C, meta.get(k), cs.get(k, 0), index) for k in w}
+    up = sum(w[k] * (1 + md["elasticity"] * disc[k]) for k in w) / wt  # 할인으로 늘어나는 수요 배율(제안 탄력성)
+    n = _count(orders * up, rng) if orders else 0
+    ext_n = min(_count(ext_orders * up, rng), n) if ext_orders else 0
+    chans = ["own"] * (n - ext_n) + ["ext"] * ext_n
+    crng.shuffle(chans)
+    fee_rate = float(params.get("external_fee_rate", 0.0))
+    ext_disc = float(params.get("external_discount_rate", 0.0))
+    pg_rate = float(C.get("pg_rate", 0.0))
+    rr = float(params.get("return_rate", DEFAULT_RETURN_RATE))
+    fill = lost = 0
+    for ch in chans:
+        c = _draw_cat(crng, w, cs, md["substitution"])
+        if c is None:
+            lost += 1
+            continue
+        fill += 1
+        unit_cost = cv[c] / cs[c]
+        cs[c] -= 1
+        cv[c] -= unit_cost
+        L["stock"] -= 1
+        L["inv_value"] -= unit_cost
+        L["tot"]["cogs"] += unit_cost
+        list_p = C["categories"][c]["list_price"]
+        ext = ch == "ext"
+        p = list_p * (1 - disc[c]) * ((1 - ext_disc) if ext else 1.0)
+        r = md["round_to"]
+        p = round(p / r) * r
+        price = int(min(list_p, max(p, math.ceil(unit_cost + md["floor_shipping"]))))  # 하한: 총원가+배송비 1,800(확정)
+        mall = crng.choice(["무신사", "W컨셉"]) if ext else "자사몰"
+        fee = int(round(price * fee_rate)) if ext else 0
+        pg = 0 if ext else int(round(price * pg_rate))
+        L["cash"] += price - fee - pg - SHIPPING
+        L["month"]["revenue"] += price
+        L["month"]["shipping"] += SHIPPING
+        L["tot"]["revenue"] += price
+        if fee:
+            L["tot"]["fee"] = L["tot"].get("fee", 0) + fee
+            L["month"]["fee"] = L["month"].get("fee", 0) + fee
+        if pg:
+            L["tot"]["pg"] = L["tot"].get("pg", 0) + pg
+            L["month"]["pg"] = L["month"].get("pg", 0) + pg
+        events.append({"type": "ledger_order", "seq": fill, "cat": c, "price": price, "list": list_p, "disc": round(disc[c], 3), "channel": mall, "fee": fee, "pg": pg})
+        u = rng.random()
+        kind = "change_of_mind" if u < rr else ("defect" if u < rr + DEFECT_RATE else None)
+        if kind:
+            L["returns"].append({"due": index + RETURN_DELAY, "kind": kind, "unit_cost": unit_cost, "cat": c, "paid": price, "fee": fee, "pg": pg, "channel": mall})
+    return fill, lost
+
+
+def _reorder(L, C, purchases, index, events):
+    """복종별 판매율이 트리거(35%)에 닿으면 판매량만큼 리오더. 원단 몫은 즉시, 나머지는 익월 10일 지급(첫 발주 비율)."""
+    R = C["reorder"]
+    meta, cs = L.get("cat_meta", {}), L.get("cat_stock", {})
+    p0 = next((p for p in purchases if p.get("fabric")), None)
+    tot0 = (p0["fabric"] + p0.get("trims_labor", 0) + p0.get("grading", 0)) if p0 else 0
+    fr = (p0["fabric"] / tot0) if tot0 else 0.0
+    day = clock.vdate(index)
+    for k in sorted(meta):
+        m = meta[k]
+        if m["base"] <= 0 or (R.get("once_per_season") and m.get("reordered")):
+            continue
+        sold = m["base"] - cs.get(k, 0)
+        if sold < R["min_qty"] or sold / m["base"] < R["trigger_sell_through"]:
+            continue
+        qty = int(round(sold * R["qty_ratio"]))
+        cost = int(round(qty * C["categories"][k]["unit_cost"]))
+        now_pay = int(round(cost * fr))
+        if now_pay:
+            _pay(L, now_pay, "리오더 %s 원단(발주 시 지급)" % k, index, events, "purchase")
+            L["month"]["reorder"] += now_pay
+        if cost - now_pay:
+            L["payables"].append({"due": next_month_10th_idx(day), "amount": cost - now_pay, "label": "리오더 %s 부자재·공임" % k})
+            L["month"]["reorder"] += cost - now_pay
+        L["arrivals"].append({"idx": index + R["lead_days"], "qty": qty, "cost": cost, "id": "RO-%s" % k, "cat": k})
+        m["reordered"] = True
+        events.append({"type": "ledger_reorder", "cat": k, "qty": qty, "cost": cost, "sell_through": round(sold / m["base"], 3)})
+
+
+def _pay_labor(L, C, index, events):
+    day = clock.vdate(index)
+    lab = C["labor"]
+    if day.isoformat() < lab["start"] or day.day < lab["pay_day"]:
+        return
+    ym = "%04d-%02d" % (day.year, day.month)
+    if L.get("labor_paid") == ym:
+        return
+    L["labor_paid"] = ym
+    amt = catalog.monthly_labor(C, day)
+    L["cash"] -= amt
+    L["tot"]["paid_out"] += amt
+    L["tot"]["labor"] = L["tot"].get("labor", 0) + amt
+    L["month"]["labor"] = L["month"].get("labor", 0) + amt
+    events.append({"type": "ledger_cash", "kind": "labor", "label": "인건비 %d명 × 최저임금 %s원 × %d시간(SIM)" % (lab["headcount"], format(int(catalog.wage(C, day)), ","), lab["monthly_hours"]), "amount": -amt, "cash_after": L["cash"]})
+
+
 def process_day(state, params, index, orders, purchases, ext_orders=0):
     """하루치 장부를 처리하고 사건 목록을 돌려준다. orders는 그날 수요 주문 수."""
     L = state.setdefault("ledger", new_ledger())
     events = []
     rng = day_rng(state["master_seed"], index, "ledger")
     crng = day_rng(state["master_seed"], index, "cat")
-    _ensure_cats(L, purchases)
+    C = params.get("catalog")
+    if not C:
+        _ensure_cats(L, purchases)
     aov = float(params.get("aov", DEFAULT_AOV))
     fee_rate = float(params.get("external_fee_rate", 0.0))
     disc = float(params.get("external_discount_rate", 0.0))
@@ -152,7 +308,9 @@ def process_day(state, params, index, orders, purchases, ext_orders=0):
             usable = a["qty"] - bad
             L["stock"] += usable
             L["inv_value"] += a["cost"]
-            if a.get("mix"):
+            if C and (a.get("mix") or a.get("cat")):
+                _receive_cat(L, C, a, usable, index)
+            elif a.get("mix"):
                 cs = L.setdefault("cat_stock", {})
                 for k, v in _split(usable, a["mix"]).items():
                     cs[k] = cs.get(k, 0) + v
@@ -176,12 +334,18 @@ def process_day(state, params, index, orders, purchases, ext_orders=0):
                     L["cash"] += r["fee"]
                     L["tot"]["fee"] = L["tot"].get("fee", 0) - r["fee"]
                     L["month"]["fee"] = L["month"].get("fee", 0) - r["fee"]
+                if r.get("pg"):  # 해석: 결제 취소 시 PG 수수료도 돌려받는다(PG 계약 조건 미확인)
+                    L["cash"] += r["pg"]
+                    L["tot"]["pg"] = L["tot"].get("pg", 0) - r["pg"]
+                    L["month"]["pg"] = L["month"].get("pg", 0) - r["pg"]
                 L["stock"] += 1
                 L["inv_value"] += r["unit_cost"]
                 L["tot"]["cogs"] -= r["unit_cost"]  # 재판매하는 반품은 매출원가에서 되돌린다
                 cat = r.get("cat") or _pick_cat(L, crng)
                 if cat and L.get("cat_stock") is not None:
                     L["cat_stock"][cat] = L["cat_stock"].get(cat, 0) + 1
+                    if C:
+                        L.setdefault("cat_value", {})[cat] = L["cat_value"].get(cat, 0.0) + r["unit_cost"]
                 rseq += 1
                 events.append({"type": "ledger_return", "seq": rseq, "kind": "change_of_mind", "cat": cat, "amount": paid, "channel": r.get("channel", "자사몰")})
             else:  # 불량: 전액 환불 + 왕복 택배비 본사 부담, 폐기
@@ -193,6 +357,10 @@ def process_day(state, params, index, orders, purchases, ext_orders=0):
                     L["cash"] += r["fee"]
                     L["tot"]["fee"] = L["tot"].get("fee", 0) - r["fee"]
                     L["month"]["fee"] = L["month"].get("fee", 0) - r["fee"]
+                if r.get("pg"):
+                    L["cash"] += r["pg"]
+                    L["tot"]["pg"] = L["tot"].get("pg", 0) - r["pg"]
+                    L["month"]["pg"] = L["month"].get("pg", 0) - r["pg"]
                 L["tot"]["discard"] += 1
                 rseq += 1
                 events.append({"type": "ledger_return", "seq": rseq, "kind": "defect", "cat": r.get("cat"), "amount": paid})
@@ -201,12 +369,18 @@ def process_day(state, params, index, orders, purchases, ext_orders=0):
     L["returns"] = keep
 
     # 5) 판매: 재고 한도 안에서만 체결
-    fill = min(orders, L["stock"])
-    lost = orders - fill
-    ext_orders = max(0, min(int(ext_orders), orders))
-    chans = ["own"] * (orders - ext_orders) + ["ext"] * ext_orders
-    crng.shuffle(chans)  # 재고가 모자랄 때 어느 채널 주문이 체결되는지는 무작위(별도 난수열)
-    for k in range(fill):
+    if C:
+        _pay_labor(L, C, index, events)
+        fill, lost = _sell_cat(L, params, C, purchases, index, day, orders, max(0, min(int(ext_orders), orders)), rng, crng, events)
+        chans, fill_old = [], 0
+    else:
+        fill = min(orders, L["stock"])
+        lost = orders - fill
+        ext_orders = max(0, min(int(ext_orders), orders))
+        chans = ["own"] * (orders - ext_orders) + ["ext"] * ext_orders
+        crng.shuffle(chans)  # 재고가 모자랄 때 어느 채널 주문이 체결되는지는 무작위(별도 난수열)
+        fill_old = fill
+    for k in range(fill_old):
         unit_cost = L["inv_value"] / L["stock"]
         L["stock"] -= 1
         L["inv_value"] -= unit_cost
@@ -238,6 +412,9 @@ def process_day(state, params, index, orders, purchases, ext_orders=0):
     if lost:
         events.append({"type": "ledger_lost_orders", "lost": lost, "filled": fill})
 
+    if C:
+        _reorder(L, C, purchases, index, events)
+
     # 6) 현금 경고
     if L["cash"] < L["min_cash"]:
         L["min_cash"] = L["cash"]
@@ -263,7 +440,7 @@ def _month_event(state, d, approvals):
         "revenue": m["revenue"], "orders": m["orders"], "lost": m["lost"], "refund": m["refund"],
         "cash": int(round(L["cash"])), "stock": L["stock"], "warnings": m["warnings"],
         "payables_open": sum(x["amount"] for x in L["payables"]),
-        "purchases_paid": m["purchases"], "ad_spend": m.get("ad_spend", 0), "fee": m.get("fee", 0), "payables_paid": m["payables_paid"],
+        "purchases_paid": m["purchases"], "ad_spend": m.get("ad_spend", 0), "fee": m.get("fee", 0), "pg": m.get("pg", 0), "labor": m.get("labor", 0), "reorder": m.get("reorder", 0), "payables_paid": m["payables_paid"],
         "approvals": [a for a in approvals if a["vdate"][:7] == ym],
     }
     L["month"] = _blank_month()
