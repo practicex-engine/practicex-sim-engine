@@ -94,16 +94,17 @@ class ReorderLaborTests(unittest.TestCase):
         self.assertFalse([e for e in ev if e["type"] == "ledger_reorder"])
 
     def test_labor_min_wage_by_year_once_per_month(self):
+        HC = C["labor"]["headcount"]
         s, p = fresh({"팬츠": 10})
         c0 = s["ledger"]["cash"]
         lg.process_day(s, p, idx(2026, 11, 25), 0, [])
-        self.assertEqual(c0 - s["ledger"]["cash"], 8 * 10320 * 209)
+        self.assertEqual(c0 - s["ledger"]["cash"], HC * 10320 * 209)
         lg.process_day(s, p, idx(2026, 11, 26), 0, [])
-        self.assertEqual(c0 - s["ledger"]["cash"], 8 * 10320 * 209)
+        self.assertEqual(c0 - s["ledger"]["cash"], HC * 10320 * 209)
         c1 = s["ledger"]["cash"]
         lg.process_day(s, p, idx(2027, 1, 25), 0, [])
-        self.assertEqual(c1 - s["ledger"]["cash"], 8 * 10700 * 209)
-        self.assertEqual(catalog.monthly_labor(C, date(2027, 6, 1)), 8 * 10700 * 209)
+        self.assertEqual(c1 - s["ledger"]["cash"], HC * 10700 * 209)
+        self.assertEqual(catalog.monthly_labor(C, date(2027, 6, 1)), HC * 10700 * 209)
 
     def test_pg_refunded_on_return(self):
         s, p = fresh({"팬츠": 10})
