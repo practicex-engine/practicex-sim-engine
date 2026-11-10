@@ -28,6 +28,7 @@ def one(seed, sc):
     params["purchases"] = sync.load_purchases(); params["approvals"] = []
     params["catalog"] = sync.load_catalog(); params["ad_schedule"] = sync.load_ad_schedule(); params["exposure"] = sync.load_exposure()
     if "rr" in sc: params["return_rate"] = sc["rr"]
+    if sc.get("mod"): sc["mod"](params)
     od, ol = supply.DEFECT_RATE, ledger.PRODUCTION_DAYS
     supply.DEFECT_RATE = sc.get("defect", od); ledger.PRODUCTION_DAYS = ol + sc.get("delay", 0)
     try:
